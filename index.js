@@ -14,10 +14,17 @@ app.use(express.json());
 
 // Fungsi untuk mengambil semua kode saham dari file lokal
 function getAllIDXStockCodes() {
-    const csvPath = path.join(__dirname, 'resource', 'stockcode.csv');
-    const csvText = fs.readFileSync(csvPath, 'utf8');
-    const records = parse.parse(csvText, { columns: true, skip_empty_lines: true });
-    return records.map(rec => rec.Code?.trim() + '.JK').filter(Boolean);
+    try {
+        const csvPath = path.join(process.cwd(), 'resource', 'stockcode.csv');
+        console.log('CSV Path:', csvPath); // Debug log
+        const csvText = fs.readFileSync(csvPath, 'utf8');
+        const records = parse.parse(csvText, { columns: true, skip_empty_lines: true });
+        console.log('Records loaded:', records.length); // Debug log
+        return records.map(rec => rec.Code?.trim() + '.JK').filter(Boolean);
+    } catch (error) {
+        console.error('Error reading CSV:', error.message);
+        return []; // Return empty array on error
+    }
 }
 
 // Fungsi untuk mengambil data saham
@@ -25,6 +32,11 @@ async function getStockData() {
     try {
         console.log('Mengambil data saham dari Yahoo Finance...');
         const IDX_STOCKS = getAllIDXStockCodes(); // <-- dinamis
+        console.log('IDX_STOCKS count:', IDX_STOCKS.length); // Debug log
+        if (IDX_STOCKS.length === 0) {
+            console.error('No stock codes loaded from CSV');
+            return [];
+        }
         const results = await yahooFinance.quote(IDX_STOCKS);
         const formattedData = results.map(stock => ({
             symbol: stock.symbol,
