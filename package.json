@@ -2,10 +2,10 @@
   "name": "scalping-ihsg",
   "version": "1.0.0",
   "description": "REST API for IDX Stock Market Data",
-  "main": "RestAPI.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node api/RestAPI.js",
-    "dev": "nodemon api/RestAPI.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
     "axios": "^1.12.2",
