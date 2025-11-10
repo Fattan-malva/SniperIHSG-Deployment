@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const yahooFinance = require('yahoo-finance2').default;
 const fs = require('fs');
+const path = require('path');
 const parse = require('csv-parse/sync'); // install: npm i csv-parse
 
 const app = express();
@@ -13,7 +14,8 @@ app.use(express.json());
 
 // Fungsi untuk mengambil semua kode saham dari file lokal
 function getAllIDXStockCodes() {
-    const csvText = fs.readFileSync('./resource/stockcode.csv', 'utf8');
+    const csvPath = path.join(__dirname, 'resource', 'stockcode.csv');
+    const csvText = fs.readFileSync(csvPath, 'utf8');
     const records = parse.parse(csvText, { columns: true, skip_empty_lines: true });
     return records.map(rec => rec.Code?.trim() + '.JK').filter(Boolean);
 }
