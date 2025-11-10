@@ -27,18 +27,45 @@ function getAllIDXStockCodes() {
     }
 }
 
-// Fungsi untuk mengambil data saham
+// Fungsi untuk mengambil data saham dengan batch fetching
 async function getStockData() {
     try {
         console.log('Mengambil data saham dari Yahoo Finance...');
-        const IDX_STOCKS = getAllIDXStockCodes(); // <-- dinamis
-        console.log('IDX_STOCKS count:', IDX_STOCKS.length); // Debug log
-        if (IDX_STOCKS.length === 0) {
+        const allStocks = getAllIDXStockCodes(); // <-- dinamis
+        console.log('All IDX_STOCKS count:', allStocks.length); // Debug log
+        if (allStocks.length === 0) {
             console.error('No stock codes loaded from CSV');
             return [];
         }
-        const results = await yahooFinance.quote(IDX_STOCKS);
-        const formattedData = results.map(stock => ({
+
+        // Fetch in batches to avoid timeouts
+        const batchSize = 50; // Fetch 50 stocks at a time
+        const batches = [];
+        for (let i = 0; i < allStocks.length; i += batchSize) {
+            batches.push(allStocks.slice(i, i + batchSize));
+        }
+
+        console.log(`Fetching in ${batches.length} batches of up to ${batchSize} stocks each`);
+
+        const allResults = [];
+        for (let i = 0; i < batches.length; i++) {
+            console.log(`Fetching batch ${i + 1}/${batches.length}...`);
+            try {
+                const batchResults = await yahooFinance.quote(batches[i]);
+                allResults.push(...batchResults);
+                console.log(`Batch ${i + 1} fetched: ${batchResults.length} stocks`);
+                // Small delay between batches to be respectful to the API
+                if (i < batches.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+            } catch (batchError) {
+                console.error(`Error fetching batch ${i + 1}:`, batchError.message);
+                // Continue with other batches even if one fails
+            }
+        }
+
+        console.log('Total fetched results count:', allResults.length); // Debug log
+        const formattedData = allResults.map(stock => ({
             symbol: stock.symbol,
             name: stock.shortName || stock.longName || 'N/A',
             price: stock.regularMarketPrice || 0,
@@ -53,9 +80,11 @@ async function getStockData() {
             open: stock.regularMarketOpen || 0,
             previousClose: stock.regularMarketPreviousClose || 0
         }));
+        console.log('Formatted data count:', formattedData.length); // Debug log
         return formattedData;
     } catch (error) {
         console.error('Error fetching data:', error.message);
+        console.error('Error stack:', error.stack);
         throw error;
     }
 }
@@ -94,14 +123,44 @@ app.get('/', (req, res) => {
 });
 
 // Get all stocks
-app.get('/api/stocks', (req, res) => {
-    res.json({
-        success: true,
-        count: cachedStocks.length,
-        data: cachedStocks,
-        lastUpdate,
-        timestamp: new Date().toISOString()
-    });
+app.get('/api/stocks', async (req, res) => {
+    try {
+        // Check if cache is empty or stale (older than 5 minutes)
+        const now = new Date();
+        const isCacheEmpty = cachedStocks.length === 0;
+        const isCacheStale = lastUpdate && (now - lastUpdate) > 5 * 60 * 1000; // 5 minutes
+
+        if (isCacheEmpty || isCacheStale) {
+            console.log('[API] Cache is empty or stale, refreshing...');
+            // Attempt to refresh with a timeout to prevent hanging
+            const refreshPromise = refreshStockCache();
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Refresh timeout')), 10000) // 10 seconds timeout
+            );
+
+            try {
+                await Promise.race([refreshPromise, timeoutPromise]);
+            } catch (refreshError) {
+                console.error('[API] Refresh failed or timed out:', refreshError.message);
+                // Continue with empty cache if refresh fails
+            }
+        }
+
+        res.json({
+            success: true,
+            count: cachedStocks.length,
+            data: cachedStocks,
+            lastUpdate,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('[API] Error in /api/stocks:', error.message);
+        res.status(500).json({
+            success: false,
+            message: 'Error fetching stock data',
+            error: error.message
+        });
+    }
 });
 
 // Get single stock by symbol
