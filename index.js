@@ -3,7 +3,7 @@ const cors = require('cors');
 const yahooFinance = require('yahoo-finance2').default;
 const fs = require('fs');
 const path = require('path');
-const parse = require('csv-parse/sync'); // install: npm i csv-parse
+const { parse } = require('csv-parse/sync'); // install: npm i csv-parse
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,15 +15,34 @@ app.use(express.json());
 // Fungsi untuk mengambil semua kode saham dari file lokal
 function getAllIDXStockCodes() {
     try {
-        const csvPath = path.join(process.cwd(), 'resource', 'stockcode.csv');
-        console.log('CSV Path:', csvPath); // Debug log
-        const csvText = fs.readFileSync(csvPath, 'utf8');
-        const records = parse.parse(csvText, { columns: true, skip_empty_lines: true });
-        console.log('Records loaded:', records.length); // Debug log
-        return records.map(rec => rec.Code?.trim() + '.JK').filter(Boolean);
+        // Try several possible locations so this works in local and serverless deployments
+        const candidates = [
+            path.join(__dirname, 'resource', 'stockcode.csv'),
+            path.join(process.cwd(), 'resource', 'stockcode.csv'),
+            path.resolve('resource', 'stockcode.csv')
+        ];
+
+        let csvPathFound = null;
+        for (const p of candidates) {
+            if (fs.existsSync(p)) {
+                csvPathFound = p;
+                break;
+            }
+        }
+
+        if (!csvPathFound) {
+            throw new Error(`stockcode.csv not found in any candidate paths: ${candidates.join(', ')}`);
+        }
+
+        console.log('CSV Path found:', csvPathFound);
+        const csvText = fs.readFileSync(csvPathFound, 'utf8');
+        const records = parse(csvText, { columns: true, skip_empty_lines: true });
+        console.log('Records loaded:', records.length);
+        return records.map(rec => (rec.Code || '').toString().trim()).filter(Boolean).map(code => `${code}.JK`);
     } catch (error) {
-        console.error('Error reading CSV:', error.message);
-        return []; // Return empty array on error
+        console.error('Error reading CSV:', error && error.message ? error.message : error);
+        // Re-throw for serverless environments so the error is visible in logs
+        return [];
     }
 }
 
@@ -93,6 +112,8 @@ async function getStockData() {
 let cachedStocks = [];
 let lastUpdate = null;
 
+// Detect serverless environment (Vercel/Now)
+const isServerless = !!process.env.VERCEL || !!process.env.NOW_REGION || !!process.env.AWS_LAMBDA_FUNCTION_NAME;
 // Fungsi untuk refresh cache
 async function refreshStockCache() {
     try {
@@ -105,9 +126,13 @@ async function refreshStockCache() {
 }
 
 // Refresh pertama saat server start
-refreshStockCache();
-// Set interval refresh setiap 1 menit
-setInterval(refreshStockCache, 60 * 1000);
+if (!isServerless) {
+    // For normal server (local), keep background cache refresh
+    refreshStockCache();
+    setInterval(refreshStockCache, 60 * 1000);
+} else {
+    console.log('[INFO] Running in serverless mode — cache will be refreshed per-request');
+}
 
 // Routes
 app.get('/', (req, res) => {
@@ -125,7 +150,20 @@ app.get('/', (req, res) => {
 // Get all stocks
 app.get('/api/stocks', async (req, res) => {
     try {
-        // Check if cache is empty or stale (older than 5 minutes)
+        // In serverless environments we fetch on-demand to avoid relying on background timers
+        if (isServerless) {
+            console.log('[API] Serverless request — fetching stock data on-demand');
+            try {
+                const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Fetch timeout')), 20000));
+                const data = await Promise.race([getStockData(), timeoutPromise]);
+                return res.json({ success: true, count: data.length, data, lastUpdate: new Date().toISOString(), timestamp: new Date().toISOString() });
+            } catch (err) {
+                console.error('[API] On-demand fetch failed:', err && err.message ? err.message : err);
+                return res.status(500).json({ success: false, message: 'Failed to fetch stock data', error: err.message || String(err) });
+            }
+        }
+
+        // Non-serverless: use cached data
         const now = new Date();
         const isCacheEmpty = cachedStocks.length === 0;
         const isCacheStale = lastUpdate && (now - lastUpdate) > 5 * 60 * 1000; // 5 minutes
@@ -134,25 +172,17 @@ app.get('/api/stocks', async (req, res) => {
             console.log('[API] Cache is empty or stale, refreshing...');
             // Attempt to refresh with a timeout to prevent hanging
             const refreshPromise = refreshStockCache();
-            const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Refresh timeout')), 10000) // 10 seconds timeout
-            );
+            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Refresh timeout')), 10000));
 
             try {
                 await Promise.race([refreshPromise, timeoutPromise]);
             } catch (refreshError) {
-                console.error('[API] Refresh failed or timed out:', refreshError.message);
+                console.error('[API] Refresh failed or timed out:', refreshError && refreshError.message ? refreshError.message : refreshError);
                 // Continue with empty cache if refresh fails
             }
         }
 
-        res.json({
-            success: true,
-            count: cachedStocks.length,
-            data: cachedStocks,
-            lastUpdate,
-            timestamp: new Date().toISOString()
-        });
+        res.json({ success: true, count: cachedStocks.length, data: cachedStocks, lastUpdate, timestamp: new Date().toISOString() });
     } catch (error) {
         console.error('[API] Error in /api/stocks:', error.message);
         res.status(500).json({
@@ -160,6 +190,26 @@ app.get('/api/stocks', async (req, res) => {
             message: 'Error fetching stock data',
             error: error.message
         });
+    }
+});
+
+// Diagnostic endpoint to check CSV reading on the deployed environment
+app.get('/api/debug/csv', (req, res) => {
+    try {
+        const candidates = [
+            path.join(__dirname, 'resource', 'stockcode.csv'),
+            path.join(process.cwd(), 'resource', 'stockcode.csv'),
+            path.resolve('resource', 'stockcode.csv')
+        ];
+
+        const found = candidates.find(p => fs.existsSync(p));
+        if (!found) return res.status(404).json({ success: false, message: 'stockcode.csv not found', candidates });
+
+        const csvText = fs.readFileSync(found, 'utf8');
+        const records = parse(csvText, { columns: true, skip_empty_lines: true });
+        res.json({ success: true, path: found, count: records.length, sample: records.slice(0, 5) });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err && err.message ? err.message : String(err) });
     }
 });
 
